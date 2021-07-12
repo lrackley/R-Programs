@@ -1,0 +1,185 @@
+*********************************************************************
+*  TITLE :      adlb.sas                                    
+*                                                                   
+*  DESCRIPTION: Programming the LB Dataset          
+*                                                                   
+*-------------------------------------------------------------------
+*  JOB NAME:    adlb.SAS                                           
+*  LANGUAGE:    SAS, VERSION 9.4                                  
+*                                                                   
+*  NAME:        Lauren Rackley                              
+*  DATE:        2021-06-27                                     
+*-------------------------------------------------------------------;
+
+libname bios511 '/home/lrackley0/BIOS 511';
+
+proc sort data=bios511.rawlab out=lb;
+	by subject;
+run;
+
+proc format;
+     invalue visit
+       "Screening" = -1
+       "Week 0" = 1
+       "Week 16" = 3
+       "Week 32" = 5;
+run;
+
+data lb;
+	length lbtest $40;
+	set lb;
+	by subject;
+	
+	format lbstresn 8.3;
+	studyid='ECHO';
+	usubjid= catx('-',studyid,site,subject);
+	
+	if labtest = "Albumin" then lbtestcd = 'ALB';
+	else if labtest = "Calcium" then lbtestcd = 'CA';
+	else if labtest = "Hematocrit" then lbtestcd = 'HCT';
+	
+	lbtest = put(labtest,40.);
+	lbcat=upcase(labcat);
+	lbstresn = value;
+	lbstresu = put(unit, 20.);
+	if ^missing(nd) then lbstat='NOT DONE';
+	lbreasnd=nd;
+	
+	visitnum= input(visdesc, visit.);;
+	visit = strip(visdesc);;
+	lbdtc=put(LABDATE,yymmdd10.);
+	
+	if labtest = "Calcium" and ^missing(value) then do;
+	if .z<value<2.1 then LBRIND="L";
+	else if 2.1<=value<=2.7 then LBRIND='N';
+	else if value>2.7 then LBRIND='H';
+		end;
+		
+	if labtest='Albumin' and ^missing(value) then do;
+	if .z<value<35 then lbrind='L';
+	else if 35<=value<=55 then lbrind='N';
+	else if value > 55 then lbrind='H';
+		end;
+	
+	drop nd   unit subject labcat labtest visdesc;
+	
+run;
+
+proc print data=lb;
+	var usubjid lbstresn;
+	where missing(lbstresn) and lbtest='Calcium';
+run;
+
+proc print data=lb;
+	var usubjid lbstresn;
+	where lbstresn > 55 and lbtest='Albumin';
+run;
+
+proc means data=lb n nmiss min max maxdec=3;
+	class lbtest lbrind / missing;
+	var lbstresn;
+	where lbtest in ('Calcium','Albumin');
+run;
+
+proc sort data=lb;
+	by usubjid;
+run;
+
+proc sort data=bios511.dm out=dm(keep=usubjid sex rfxstdtc);
+	by usubjid;
+run;
+
+data dm_lb;
+	merge lb(in=a) dm(in=b);
+	by usubjid;
+	if a and b;
+	
+	if lbtest='Hematocrit' and sex='F' and ^missing(lbstresn) then do;
+		if .z<lbstresn<0.349 then lbrind='L';
+		else if .349<=lbstresn<=0.445 then lbrind='N';
+		else if lbstresn >0.445 then lbrind='H';
+			end;
+			
+	if lbtest="Hematocrit" and sex="F" then
+		if lbstresn<0.349 then LBRIND="L";
+		else if lbstresn>=0.349 and lbstresn<=0.445 then LBRIND="N";
+		else if lbstresn >0.445 then LBRIND="H";
+		
+	if lbtest="Hematocrit" and sex="M" then
+		if lbstresn<0.388 then LBRIND="L";
+		else if lbstresn>=0.388 and lbstresn<=0.500 then LBRIND="N";
+		else if lbstresn >0.500 then LBRIND="H";
+		
+run;
+
+proc means data=dm_lb maxdec=3 n nmiss min max;
+	class  sex lbrind / missing;
+	var lbstresn;
+	where lbtest='Hematocrit';
+run;
+
+PROC SORT DATA=dm_lb;
+  BY usubjid lbcat lbtestcd DESCENDING lbdtc;
+RUN;
+
+DATA lb2(drop=flag); ** drop the temporary variable **;
+  SET dm_lb;
+  BY usubjid lbcat lbtestcd DESCENDING lbdtc;
+   ** variable flag is used to identify if one test has LBBLFL marked **;
+  RETAIN flag;
+   ** flag=0 indicating there is no LBBLFL marked yet. **; 
+  IF first.lbtestcd THEN flag=0;
+  ** RFXSTDTC below has the first dosing dates. **;
+  IF flag=0 and lbdtc <= rfxstdtc and LBSTRESN gt .z THEN DO;
+    LBBLFL='Y'; ** LBBLFL='Y' indicates the baseline record. **;
+    flag=1; ** flag=1 indicating the ABLFL is marked. **;
+  END;
+RUN; 
+
+*create lbseq variable;
+proc sort data=lb2;
+	by studyid usubjid lbcat lbtestcd visitnum;
+run;
+
+data bios511.adlb;
+
+	set lb2;
+	by studyid usubjid lbcat lbtestcd visitnum;
+	
+	if not (first.visitnum and last.visitnum) then 
+	put "WARNING key variables do not define a unique record." usubjid= ; 
+	
+	if first.visitnum then lbseq=0;
+	lbseq+1;
+	
+	
+	label 
+	studyid='Study Identifier for the Study'
+	usubjid='Unique Subject Identifier'
+	LBBLFL = 'Baseline Flag'
+	lbseq = 'Sequence Number'
+	lbtestcd = 'Lab Test or Examination Short Name'
+	lbtest = 'Lab Test or Examination Name'
+	lbcat = 'Category for Lab Test'
+	lbdtc = 'Date/Time of Specimen Collection'
+	lbreasnd = 'Reason Test Not Done'
+	lbrind = 'Reference Range Indicator'
+	lbstat = 'Completion Status'
+	lbstresn = 'Numeric Result/Finding in Standard Units'
+	lbstresu = 'Standard Units'
+	visit='Visit'
+	visitnum = 'Visit Number';
+	
+	drop value sex labdate  ;
+	retain studyid usubjid lbseq lbtestcd lbtest lbcat lbstresn
+	lbstresu lbrind lbstat lbreasnd LBBLFL visitnum visit lbdtc;
+run;
+
+proc print data=bios511.adlb(obs=25) label;
+run;
+
+proc contents data=bios511.adlb varnum;
+run;
+ 
+	
+		
